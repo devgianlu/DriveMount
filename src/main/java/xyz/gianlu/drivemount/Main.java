@@ -76,14 +76,8 @@ public class Main {
                 .setPageSize(1000 /* Max */)
                 .execute().getFiles());
 
-        CustomFileSystem fs = new CustomFileSystem(new FileSystemInformation(new EnumIntegerSet<>(FileSystemFlag.NONE)), drive);
+        GoogleDriveFileSystem fs = new GoogleDriveFileSystem(new FileSystemInformation(new EnumIntegerSet<>(FileSystemFlag.NONE)), drive);
         fs.mount(new File("K:\\").toPath(), "DriveMount (" + about.getUser().getEmailAddress() + ")", 30975, true,
                 3000, 4096, 512, null, (short) 5, new EnumIntegerSet<>(MountOption.DEBUG_MODE));
-
-        /*
-        DirListingFileSystem dfs = new DirListingFileSystem(new File("./").toPath(), new FileSystemInformation(new EnumIntegerSet<>(FileSystemFlag.NONE)));
-        dfs.mount(new File("L:\\").toPath(), "GOOGLE", 30976, true,
-                3000, 4096, 512, null, (short) 5, new EnumIntegerSet<>(MountOption.DEBUG_MODE));
-*/
     }
 }
