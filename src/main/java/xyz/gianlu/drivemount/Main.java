@@ -17,13 +17,15 @@ import com.google.api.services.drive.DriveScopes;
 import com.google.api.services.drive.model.About;
 import org.jetbrains.annotations.NotNull;
 
+import java.awt.*;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.URI;
 import java.security.GeneralSecurityException;
 import java.util.Collections;
-import java.util.Scanner;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * @author Gianlu
@@ -32,8 +34,20 @@ public class Main {
     private static final JsonFactory JSON_FACTORY = new JacksonFactory();
     private static final String APP_NAME = "DriveMount";
 
+    private static void launchUrl(@NotNull URI url) throws IOException {
+        if (Desktop.isDesktopSupported()) {
+            Desktop desktop = Desktop.getDesktop();
+            if (desktop.isSupported(Desktop.Action.BROWSE)) {
+                desktop.browse(url);
+                return;
+            }
+        }
+
+        System.out.println("Visit the following page: " + url);
+    }
+
     @NotNull
-    private static Credential authorize(@NotNull HttpTransport transport) throws IOException {
+    private static Credential authorize(@NotNull HttpTransport transport) throws IOException, InterruptedException {
         InputStream googleServices = Main.class.getClassLoader().getResourceAsStream("google-services.json");
         if (googleServices == null) throw new IllegalStateException("Missing google-services.json file!");
 
@@ -46,13 +60,41 @@ public class Main {
 
         StoredCredential stored = flow.getCredentialDataStore().get(APP_NAME);
         if (stored == null) {
-            GoogleAuthorizationCodeRequestUrl url = flow.newAuthorizationUrl();
-            url.setRedirectUri("http://localhost/");
-            System.out.println(url.toURL());
+            final Object lock = new Object();
+            final AtomicReference<String> obtainedCode = new AtomicReference<>(null);
+            int port = OAuthCallbackServer.start(new OAuthCallbackServer.Callback() {
+                @Override
+                public void obtainedCode(@NotNull String code) {
+                    obtainedCode.set(code);
+                    synchronized (lock) {
+                        lock.notifyAll();
+                    }
+                }
 
-            Scanner scanner = new Scanner(System.in);
-            String code = scanner.nextLine();
-            GoogleTokenResponse token = flow.newTokenRequest(code).setRedirectUri("http://localhost/").execute();
+                @Override
+                public void failed() {
+                    obtainedCode.set(null);
+                    synchronized (lock) {
+                        lock.notifyAll();
+                    }
+                }
+            });
+
+            String redirectUri = "http://localhost:" + port + "/";
+
+            GoogleAuthorizationCodeRequestUrl url = flow.newAuthorizationUrl();
+            url.setRedirectUri(redirectUri);
+            launchUrl(url.toURI());
+
+            synchronized (lock) {
+                lock.wait();
+            }
+
+            String code = obtainedCode.get();
+            if (code == null) throw new IllegalStateException("Failed obtaining authorization code!");
+
+            GoogleTokenResponse token = flow.newTokenRequest(code)
+                    .setRedirectUri(redirectUri).execute();
 
             return flow.createAndStoreCredential(token, APP_NAME);
         } else {
@@ -67,7 +109,7 @@ public class Main {
         }
     }
 
-    public static void main(String[] args) throws GeneralSecurityException, IOException {
+    public static void main(String[] args) throws GeneralSecurityException, IOException, InterruptedException {
         HttpTransport transport = GoogleApacheHttpTransport.newTrustedTransport();
         Credential credential = authorize(transport);
 
