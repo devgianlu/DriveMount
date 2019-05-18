@@ -13,7 +13,6 @@ import com.google.api.services.drive.model.File;
 import com.sun.jna.Pointer;
 import com.sun.jna.WString;
 import com.sun.jna.platform.win32.WinBase;
-import com.sun.jna.platform.win32.WinNT;
 import com.sun.jna.ptr.IntByReference;
 import com.sun.jna.ptr.LongByReference;
 import org.apache.log4j.Level;
@@ -21,7 +20,6 @@ import org.apache.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
-import java.nio.file.attribute.FileTime;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -30,17 +28,58 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class GoogleDriveFileSystem extends DokanyFileSystemStub {
     private static final Logger LOGGER = Logger.getLogger(GoogleDriveFileSystem.class);
-    private final Drive drive;
 
     static {
         LOGGER.setLevel(Level.ALL);
     }
 
+    private final Drive drive;
+    private final FilesTree root;
     private final AtomicLong contextCounter = new AtomicLong(0);
 
     public GoogleDriveFileSystem(@NotNull FileSystemInformation fileSystemInformation, @NotNull Drive drive) {
         super(fileSystemInformation, false);
         this.drive = drive;
+        this.root = new FilesTree("", "/", null);
+
+        try {
+            populate(root);
+        } catch (IOException ex) {
+            throw new RuntimeException("Failed initializing drive!", ex);
+        }
+    }
+
+    private void populate(@NotNull FilesTree tree) throws IOException {
+        if (tree.populated) return;
+
+        if (tree.isRoot()) {
+            List<File> files = drive.files().list()
+                    .setFields("files(parents)").setQ("trashed=false")
+                    .setSpaces("drive").execute().getFiles();
+
+            String rootId = null;
+            for (File file : files) {
+                List<String> parents = file.getParents();
+                if (parents.size() > 1) throw new UnsupportedOperationException("File has more than one parent.");
+
+                if (Utils.isRootDirectory(parents.get(0))) {
+                    rootId = parents.get(0);
+                    break;
+                }
+            }
+
+            if (rootId == null) // Drive is empty
+                return;
+
+            tree.id = rootId;
+        }
+
+        List<File> files = drive.files().list()
+                .setFields("*").setSpaces("drive")
+                .setQ(String.format("trashed=false and '%s' in parents and (not mimeType contains 'application/vnd.google-apps.' or mimeType='application/vnd.google-apps.folder')", tree.id))
+                .execute().getFiles();
+
+        tree.populate(files);
     }
 
     @Override
@@ -74,48 +113,26 @@ public class GoogleDriveFileSystem extends DokanyFileSystemStub {
 
         LOGGER.trace(String.format("Find files {path: %s, context: %d}", rawPath, dokanFileInfo.Context));
 
-        List<File> files;
         if (rawPath.toString().equals("\\")) {
-            try {
-                files = drive.files().list().setFields("*").setSpaces("drive").execute().getFiles();
-            } catch (IOException ex) {
-                return Win32ErrorCodes.ERROR_IO_DEVICE;
-            }
-        } else {
-            return Win32ErrorCodes.ERROR_FILE_NOT_FOUND; // TODO: Find files (https://developers.google.com/drive/api/v3/search-files)
+            root.writeTo(rawFillFindData, volumeSerialnumber, dokanFileInfo);
+            return Win32ErrorCodes.ERROR_SUCCESS;
         }
 
-        for (File file : files) {
-            if (Utils.isGSuiteDocument(file) || file.getTrashed() || file.getShared()) continue;
+        String path = rawPath.toString();
+        path = path.replace('\\', '/');
 
-            ByHandleFileInformation info = getFileInformation(file);
-            rawFillFindData.fillWin32FindData(info.toWin32FindData(), dokanFileInfo);
+        FilesTree dir = root.findDirectory(path);
+        if (dir == null) return Win32ErrorCodes.ERROR_FILE_NOT_FOUND;
+
+        try {
+            populate(dir);
+        } catch (IOException ex) {
+            LOGGER.error(String.format("Failed populating directory. {path: %s, id: %s}", dir.path, dir.id), ex);
+            return Win32ErrorCodes.ERROR_IO_DEVICE;
         }
 
+        dir.writeTo(rawFillFindData, volumeSerialnumber, dokanFileInfo);
         return Win32ErrorCodes.ERROR_SUCCESS;
-    }
-
-    @NotNull
-    private ByHandleFileInformation getFileInformation(@NotNull File file) {
-        long index = file.getId().hashCode();
-
-        int fileAttr = 0;
-        fileAttr |= 0; // attr.isArchive() ? WinNT.FILE_ATTRIBUTE_ARCHIVE : 0;
-        fileAttr |= 0; // attr.isSystem() ? WinNT.FILE_ATTRIBUTE_SYSTEM : 0;
-        fileAttr |= 0; // attr.isHidden() ? WinNT.FILE_ATTRIBUTE_HIDDEN : 0;
-        fileAttr |= 0; // attr.isReadOnly() ? WinNT.FILE_ATTRIBUTE_READONLY : 0;
-        fileAttr |= Utils.isDirectory(file) ? WinNT.FILE_ATTRIBUTE_DIRECTORY : 0;
-        fileAttr |= 0; // attr.isSymbolicLink() ? WinNT.FILE_ATTRIBUTE_REPARSE_POINT : 0;
-
-        if (fileAttr == 0) fileAttr |= WinNT.FILE_ATTRIBUTE_NORMAL;
-
-        String name = file.getOriginalFilename();
-        if (name == null) name = file.getName();
-
-        return new ByHandleFileInformation(new java.io.File(name).toPath(), fileAttr,
-                FileTime.fromMillis(file.getCreatedTime().getValue()), FileTime.fromMillis(file.getModifiedTime().getValue()),
-                FileTime.fromMillis(file.getModifiedTime().getValue()),
-                this.volumeSerialnumber, file.getSize() == null ? 0 : file.getSize().longValue(), index);
     }
 
     @Override
