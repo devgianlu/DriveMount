@@ -15,10 +15,12 @@ import com.google.api.client.util.store.FileDataStoreFactory;
 import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.DriveScopes;
 import com.google.api.services.drive.model.About;
+import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.StringReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.security.GeneralSecurityException;
 import java.util.Collections;
 import java.util.Scanner;
@@ -28,16 +30,21 @@ import java.util.Scanner;
  */
 public class Main {
     private static final JsonFactory JSON_FACTORY = new JacksonFactory();
+    private static final String APP_NAME = "DriveMount";
 
-    private static Credential authorize(HttpTransport transport) throws IOException {
-        GoogleClientSecrets clientSecrets = GoogleClientSecrets.load(JSON_FACTORY, new StringReader("{\"installed\":{\"client_id\":\"727426688073-gfr9ere6hvitifkcbi5jg31pqb73hqrd.apps.googleusercontent.com\",\"project_id\":\"drivemount-java\",\"auth_uri\":\"https://accounts.google.com/o/oauth2/auth\",\"token_uri\":\"https://oauth2.googleapis.com/token\",\"auth_provider_x509_cert_url\":\"https://www.googleapis.com/oauth2/v1/certs\",\"client_secret\":\"1mV346QMsoe7jGD7PmvRHpTT\",\"redirect_uris\":[\"urn:ietf:wg:oauth:2.0:oob\",\"http://localhost\"]}}"));
+    @NotNull
+    private static Credential authorize(@NotNull HttpTransport transport) throws IOException {
+        InputStream googleServices = Main.class.getClassLoader().getResourceAsStream("google-services.json");
+        if (googleServices == null) throw new IllegalStateException("Missing google-services.json file!");
+
+        GoogleClientSecrets clientSecrets = GoogleClientSecrets.load(JSON_FACTORY, new InputStreamReader(googleServices));
 
         GoogleAuthorizationCodeFlow flow = new GoogleAuthorizationCodeFlow.Builder(transport, JSON_FACTORY, clientSecrets,
                 Collections.singleton(DriveScopes.DRIVE))
-                .setDataStoreFactory(new FileDataStoreFactory(new File("./")))
+                .setDataStoreFactory(new FileDataStoreFactory(new File("./appData/")))
                 .build();
 
-        StoredCredential stored = flow.getCredentialDataStore().get("TEST");
+        StoredCredential stored = flow.getCredentialDataStore().get(APP_NAME);
         if (stored == null) {
             GoogleAuthorizationCodeRequestUrl url = flow.newAuthorizationUrl();
             url.setRedirectUri("http://localhost/");
@@ -47,7 +54,7 @@ public class Main {
             String code = scanner.nextLine();
             GoogleTokenResponse token = flow.newTokenRequest(code).setRedirectUri("http://localhost/").execute();
 
-            return flow.createAndStoreCredential(token, "TEST");
+            return flow.createAndStoreCredential(token, APP_NAME);
         } else {
             return new GoogleCredential.Builder()
                     .setTransport(transport)
@@ -65,16 +72,10 @@ public class Main {
         Credential credential = authorize(transport);
 
         Drive drive = new Drive.Builder(transport, JSON_FACTORY, credential)
-                .setApplicationName("DriveMount")
+                .setApplicationName(APP_NAME)
                 .build();
 
-        About about = drive.about().get().setFields("*").execute();
-        System.out.println(about);
-
-        System.out.println(drive.files().list()
-                .setFields("*" /* Dev only */)
-                .setPageSize(1000 /* Max */)
-                .execute().getFiles());
+        About about = drive.about().get().setFields("user").execute();
 
         GoogleDriveFileSystem fs = new GoogleDriveFileSystem(new FileSystemInformation(new EnumIntegerSet<>(FileSystemFlag.NONE)), drive);
         fs.mount(new File("K:\\").toPath(), "DriveMount (" + about.getUser().getEmailAddress() + ")", 30975, true,
