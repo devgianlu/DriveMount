@@ -33,10 +33,19 @@ public class FilesTree {
     }
 
     @Nullable
-    private static FilesTree findDirectChild(@NotNull FilesTree parent, @NotNull String name) {
+    private static FilesTree findDirectDirectoryChild(@NotNull FilesTree parent, @NotNull String name) {
         for (FilesTree tree : parent.directories)
             if (Objects.equals(tree.name, name))
                 return tree;
+
+        return null;
+    }
+
+    @Nullable
+    private static File findDirectFileChild(@NotNull FilesTree parent, @NotNull String name) {
+        for (File file : parent.files)
+            if (Objects.equals(file.getOriginalFilename(), name))
+                return file;
 
         return null;
     }
@@ -65,19 +74,44 @@ public class FilesTree {
         populated = true;
     }
 
+    @NotNull
+    public ByHandleFileInformation getDirectoryInfo(int volumeSerialnumber) {
+        if (directory == null) throw new IllegalStateException();
+
+        return new ByHandleFileInformation(new java.io.File(path).toPath(), WinNT.FILE_ATTRIBUTE_DIRECTORY,
+                FileTime.fromMillis(directory.getCreatedTime().getValue()), FileTime.fromMillis(directory.getModifiedTime().getValue()),
+                FileTime.fromMillis(directory.getModifiedTime().getValue()),
+                volumeSerialnumber, 0, id.hashCode());
+    }
+
     public void writeTo(@NotNull DokanyOperations.FillWin32FindData rawFillFindData, int volumeSerialnumber, @NotNull DokanFileInfo dokanFileInfo) {
-        for (FilesTree tree : directories) {
-            ByHandleFileInformation info = new ByHandleFileInformation(new java.io.File(tree.path).toPath(), WinNT.FILE_ATTRIBUTE_DIRECTORY,
-                    FileTime.fromMillis(tree.directory.getCreatedTime().getValue()), FileTime.fromMillis(tree.directory.getModifiedTime().getValue()),
-                    FileTime.fromMillis(tree.directory.getModifiedTime().getValue()),
-                    volumeSerialnumber, 0, tree.id.hashCode());
-            rawFillFindData.fillWin32FindData(info.toWin32FindData(), dokanFileInfo);
-        }
+        for (FilesTree tree : directories)
+            rawFillFindData.fillWin32FindData(tree.getDirectoryInfo(volumeSerialnumber).toWin32FindData(), dokanFileInfo);
 
         for (File file : files) {
             ByHandleFileInformation info = Utils.getFileInformation(file, volumeSerialnumber);
             rawFillFindData.fillWin32FindData(info.toWin32FindData(), dokanFileInfo);
         }
+    }
+
+    @Nullable
+    public Object findWhatever(@NotNull String path, boolean file) {
+        if (path.equals("/")) return this;
+
+        FilesTree current = this;
+        String[] split = path.split("/");
+        for (int i = 0; i < split.length; i++) {
+            if (split[i].isEmpty()) continue;
+
+            if (i == split.length - 1 && file) {
+                return findDirectFileChild(current, split[i]);
+            } else {
+                current = findDirectDirectoryChild(current, split[i]);
+                if (current == null) return null;
+            }
+        }
+
+        return current;
     }
 
     @Nullable
@@ -89,7 +123,7 @@ public class FilesTree {
         for (String str : split) {
             if (str.isEmpty()) continue;
 
-            current = findDirectChild(current, str);
+            current = findDirectDirectoryChild(current, str);
             if (current == null) return null;
         }
 

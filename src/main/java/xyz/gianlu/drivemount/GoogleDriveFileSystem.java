@@ -4,9 +4,11 @@ import com.dokan.java.DokanyFileSystemStub;
 import com.dokan.java.DokanyOperations;
 import com.dokan.java.DokanyUtils;
 import com.dokan.java.FileSystemInformation;
+import com.dokan.java.constants.microsoft.CreateOption;
 import com.dokan.java.constants.microsoft.Win32ErrorCodes;
 import com.dokan.java.structure.ByHandleFileInformation;
 import com.dokan.java.structure.DokanFileInfo;
+import com.dokan.java.structure.EnumIntegerSet;
 import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.model.About;
 import com.google.api.services.drive.model.File;
@@ -20,7 +22,9 @@ import org.apache.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -36,11 +40,14 @@ public class GoogleDriveFileSystem extends DokanyFileSystemStub {
     private final Drive drive;
     private final FilesTree root;
     private final AtomicLong contextCounter = new AtomicLong(0);
+    private final Map<Long, FileHandler> openHandlers = new HashMap<>();
+    private final FileHandler rootHandler;
 
     public GoogleDriveFileSystem(@NotNull FileSystemInformation fileSystemInformation, @NotNull Drive drive) {
         super(fileSystemInformation, false);
         this.drive = drive;
         this.root = new FilesTree("", "/", null);
+        this.rootHandler = new RootHandler();
 
         try {
             populate(root);
@@ -87,6 +94,33 @@ public class GoogleDriveFileSystem extends DokanyFileSystemStub {
         dokanFileInfo.Context = contextCounter.incrementAndGet();
         LOGGER.trace(String.format("Create file {path: %s, context: %d}", rawPath, dokanFileInfo.Context));
 
+        String path = rawPath.toString();
+        path = path.replace('\\', '/');
+
+        if (path.equals("/")) {
+            openHandlers.put(dokanFileInfo.Context, rootHandler);
+            dokanFileInfo.IsDirectory = (byte) 1;
+            return Win32ErrorCodes.ERROR_SUCCESS;
+        }
+
+        EnumIntegerSet<CreateOption> createOptions = CreateOption.fromInt(rawCreateOptions);
+
+        FileHandler handler;
+        Object whatever = root.findWhatever(path, createOptions.contains(CreateOption.FILE_DIRECTORY_FILE));
+        if (whatever instanceof File) {
+            handler = new FileHandler((File) whatever);
+        } else if (whatever instanceof FilesTree) {
+            handler = new FileHandler((FilesTree) whatever);
+        } else if (whatever == null) {
+            return Win32ErrorCodes.ERROR_FILE_NOT_FOUND;
+        } else {
+            throw new IllegalArgumentException();
+        }
+
+        openHandlers.put(dokanFileInfo.Context, handler);
+
+        dokanFileInfo.IsDirectory = (byte) (handler.isDirectory() ? 1 : 0);
+
         // TODO: Create file
 
         return Win32ErrorCodes.ERROR_SUCCESS;
@@ -94,16 +128,14 @@ public class GoogleDriveFileSystem extends DokanyFileSystemStub {
 
     @Override
     public int getFileInformation(WString rawPath, ByHandleFileInformation handleFileInfo, DokanFileInfo dokanFileInfo) {
-        if (dokanFileInfo.Context == 0)
+        FileHandler handler;
+        if (dokanFileInfo.Context == 0 || (handler = openHandlers.get(dokanFileInfo.Context)) == null)
             return Win32ErrorCodes.ERROR_INVALID_HANDLE;
 
         LOGGER.trace(String.format("Get file info {path: %s, context: %d}", rawPath, dokanFileInfo.Context));
 
-        if (rawPath.toString().equals("\\")) {
-            return Win32ErrorCodes.ERROR_SUCCESS;
-        } else {
-            return Win32ErrorCodes.ERROR_FILE_NOT_FOUND; // TODO: Get file information
-        }
+        handler.writeTo(handleFileInfo); // FIXME: File properties aren't working properly
+        return Win32ErrorCodes.ERROR_SUCCESS;
     }
 
     @Override
@@ -138,6 +170,7 @@ public class GoogleDriveFileSystem extends DokanyFileSystemStub {
     @Override
     public void closeFile(WString rawPath, DokanFileInfo dokanFileInfo) {
         LOGGER.trace(String.format("Close file {path: %s, context: %d}", rawPath, dokanFileInfo.Context));
+        openHandlers.remove(dokanFileInfo.Context);
         dokanFileInfo.Context = 0;
     }
 
@@ -167,5 +200,45 @@ public class GoogleDriveFileSystem extends DokanyFileSystemStub {
         totalNumberOfFreeBytes.setValue(limit - usage);
         totalNumberOfBytes.setValue(limit);
         return Win32ErrorCodes.ERROR_SUCCESS;
+    }
+
+    private final class RootHandler extends FileHandler {
+
+        RootHandler() {
+            super(root);
+        }
+
+        @Override
+        void writeTo(@NotNull ByHandleFileInformation handleFileInfo) {
+        }
+    }
+
+    private class FileHandler {
+        private final File file;
+        private final FilesTree dir;
+
+        FileHandler(@NotNull File file) {
+            this.file = file;
+            this.dir = null;
+        }
+
+        FileHandler(@NotNull FilesTree dir) {
+            this.dir = dir;
+            this.file = null;
+        }
+
+        boolean isDirectory() {
+            return dir != null && file == null;
+        }
+
+        void writeTo(@NotNull ByHandleFileInformation handleFileInfo) {
+            if (dir != null) {
+                dir.getDirectoryInfo(volumeSerialnumber).copyTo(handleFileInfo);
+            } else if (file != null) {
+                Utils.getFileInformation(file, volumeSerialnumber).copyTo(handleFileInfo);
+            } else {
+                throw new IllegalStateException();
+            }
+        }
     }
 }

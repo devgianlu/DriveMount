@@ -47,7 +47,7 @@ public final class Utils {
         Long size = file.getSize();
         if (size == null) size = 0L;
 
-        return new ByHandleFileInformation(new java.io.File(name).toPath(), fileAttr,
+        return new ByHandleFileInformation(new java.io.File(name).toPath() /* FIXME: Create full path */, fileAttr,
                 FileTime.fromMillis(file.getCreatedTime().getValue()), FileTime.fromMillis(file.getModifiedTime().getValue()),
                 FileTime.fromMillis(file.getModifiedTime().getValue()),
                 volumeSerialnumber, size, index);
